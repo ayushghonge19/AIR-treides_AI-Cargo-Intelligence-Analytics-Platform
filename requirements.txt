@@ -1,0 +1,13 @@
+langchain-groq
+langgraph
+langchain-community
+langchain-core
+tavily-python
+sqlalchemy
+psycopg2-binary
+streamlit
+python-dotenv
+pandas
+openpyxl
+plotly
+pytest
