@@ -50,6 +50,7 @@ def _graph_config() -> dict:
 
 # Helper to execute query to dataframe or value
 def run_query_val(query: str):
+    print(os.getenv("SUPABASE_URL"))
     engine = create_engine(get_safe_db_url(os.getenv("SUPABASE_URL")))
     with engine.connect() as conn:
         res = conn.execute(text(query)).fetchone()
@@ -58,6 +59,7 @@ def run_query_val(query: str):
 def run_query_df(query: str):
     engine = create_engine(get_safe_db_url(os.getenv("SUPABASE_URL")))
     return pd.read_sql(query, engine)
+
 
 # ---------------------------------------------------------------------------
 # Graph Runner Logic

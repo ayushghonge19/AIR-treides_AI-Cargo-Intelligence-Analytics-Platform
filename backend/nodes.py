@@ -3,6 +3,8 @@ import os
 import re
 import time
 
+from groq import RateLimitError
+
 from dotenv import load_dotenv
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_community.utilities import SQLDatabase
@@ -153,7 +155,7 @@ def search_web_news(query: str) -> str:
 # Message trimming (stay under Groq free-tier TPM limits)
 # ---------------------------------------------------------------------------
 
-MAX_HISTORY = 10
+MAX_HISTORY = 6
 
 
 # ---------------------------------------------------------------------------
@@ -196,15 +198,23 @@ def agent(state: AgentState) -> dict:
     # Combine system prompt, few-shot examples, and actual message history
     payload = [system] + FEW_SHOT_EXAMPLES + list(messages)
 
-    # Invoke with retry logic for tool_use_failed errors
-    for attempt in range(3):
+    # Invoke with retry logic for tool_use_failed and rate limit errors
+    for attempt in range(5):
         try:
             response = llm.invoke(payload)
             return {"messages": [response]}
+        except RateLimitError as exc:
+            wait = min(30, 2 ** attempt * 5)
+            time.sleep(wait)
+            continue
         except Exception as exc:
             err_str = str(exc)
             if "tool_use_failed" in err_str or "Failed to call a function" in err_str:
                 time.sleep(0.5)
+                continue
+            if "rate_limit" in err_str.lower() or "429" in err_str:
+                wait = min(30, 2 ** attempt * 5)
+                time.sleep(wait)
                 continue
             raise exc
 
@@ -242,17 +252,30 @@ def report_writer(state: AgentState) -> dict:
     conversation = "\n".join(lines)
 
     llm = _get_llm()
-    try:
-        response = llm.invoke(
-            [
-                SystemMessage(content=REPORT_SYSTEM_PROMPT),
-                HumanMessage(content=f"Conversation:\n{conversation}"),
-            ]
-        )
-        answer = response.content or ""
-    except Exception as exc:
-        answer = f"Report generation error: {exc}"
+    for attempt in range(5):
+        try:
+            response = llm.invoke(
+                [
+                    SystemMessage(content=REPORT_SYSTEM_PROMPT),
+                    HumanMessage(content=f"Conversation:\n{conversation}"),
+                ]
+            )
+            answer = response.content or ""
+            return {"final_answer": answer, "messages": [AIMessage(content=answer)]}
+        except RateLimitError:
+            wait = min(30, 2 ** attempt * 5)
+            time.sleep(wait)
+            continue
+        except Exception as exc:
+            err_str = str(exc)
+            if "rate_limit" in err_str.lower() or "429" in err_str:
+                wait = min(30, 2 ** attempt * 5)
+                time.sleep(wait)
+                continue
+            answer = f"Report generation error: {exc}"
+            return {"final_answer": answer, "messages": [AIMessage(content=answer)]}
 
+    answer = "Rate limit exceeded. Please wait a moment and try again."
     return {"final_answer": answer, "messages": [AIMessage(content=answer)]}
 
 
@@ -267,14 +290,30 @@ def stream_report_writer(state_values: dict):
     conversation = "\n".join(lines)
 
     llm = _get_llm()
-    for chunk in llm.stream(
-        [
-            SystemMessage(content=REPORT_SYSTEM_PROMPT),
-            HumanMessage(content=f"Conversation:\n{conversation}"),
-        ]
-    ):
-        if chunk.content:
-            yield chunk.content
+    for attempt in range(5):
+        try:
+            for chunk in llm.stream(
+                [
+                    SystemMessage(content=REPORT_SYSTEM_PROMPT),
+                    HumanMessage(content=f"Conversation:\n{conversation}"),
+                ]
+            ):
+                if chunk.content:
+                    yield chunk.content
+            return  # Successfully streamed
+        except RateLimitError:
+            wait = min(30, 2 ** attempt * 5)
+            time.sleep(wait)
+            continue
+        except Exception as exc:
+            err_str = str(exc)
+            if "rate_limit" in err_str.lower() or "429" in err_str:
+                wait = min(30, 2 ** attempt * 5)
+                time.sleep(wait)
+                continue
+            yield f"\n\nReport generation error: {exc}"
+            return
+    yield "\n\nRate limit exceeded. Please wait a moment and try again."
 
 
 TOOLS = [execute_sql_query, search_web_news]
