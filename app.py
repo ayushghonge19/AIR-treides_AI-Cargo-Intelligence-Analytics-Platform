@@ -50,7 +50,7 @@ def _graph_config() -> dict:
 
 # Helper to execute query to dataframe or value
 def run_query_val(query: str):
-    print(os.getenv("SUPABASE_URL"))
+    #print(os.getenv("SUPABASE_URL"))
     engine = create_engine(get_safe_db_url(os.getenv("SUPABASE_URL")))
     with engine.connect() as conn:
         res = conn.execute(text(query)).fetchone()
@@ -405,39 +405,87 @@ with st.sidebar:
 
     st.divider()
     st.header("📁 Data Ingestion Pipeline")
-    uploaded_file = st.file_uploader(
-        "Upload air cargo CSV or Excel",
-        type=["csv", "xlsx", "xls"],
-        help=(
-            "Expected columns: month, airport_name, airline, "
-            "commodity_type, export_import, weight_tons"
-        ),
-    )
+    
+    # Ingestion Mode Selection Tabs in Sidebar
+    ingest_tab_sql, ingest_tab_vec = st.tabs(["📊 SQL (CSV/Excel)", "📚 Vectors (PDF/Docs)"])
+    
+    with ingest_tab_sql:
+        st.caption("Upload structured air cargo spreadsheets to Supabase PostgreSQL.")
+        uploaded_file = st.file_uploader(
+            "Upload air cargo CSV or Excel",
+            type=["csv", "xlsx", "xls"],
+            help=(
+                "Expected columns: month, airport_name, airline, "
+                "commodity_type, export_import, weight_tons"
+            ),
+            key="sql_uploader"
+        )
 
-    if uploaded_file is not None:
-        upload_key = f"{uploaded_file.name}:{uploaded_file.size}"
-        if st.session_state.last_uploaded != upload_key:
-            try:
-                with st.status("Processing upload...", expanded=True) as upl:
-                    upl.write("📋 Validating schema...")
-                    upl.write("💾 Syncing to database...")
-                    result = process_and_upload_file(uploaded_file, upsert=st.session_state.upsert_mode)
+        if uploaded_file is not None:
+            upload_key = f"{uploaded_file.name}:{uploaded_file.size}"
+            if st.session_state.last_uploaded != upload_key:
+                try:
+                    with st.status("Processing upload...", expanded=True) as upl:
+                        upl.write("📋 Validating schema...")
+                        upl.write("💾 Syncing to database...")
+                        result = process_and_upload_file(uploaded_file, upsert=st.session_state.upsert_mode)
 
-                st.session_state.last_uploaded = upload_key
+                    st.session_state.last_uploaded = upload_key
 
-                if result["success"]:
-                    st.success(
-                        f"✅ Inserted/Updated {result['rows_inserted']} rows "
-                        f"into air_cargo_data."
-                    )
-                    st.toast(
-                        f"Ingested {result['rows_inserted']} rows!",
-                        icon="✅",
-                    )
-                else:
-                    st.error(result["error"])
-            except Exception as exc:
-                st.error(f"Upload failed: {exc}")
+                    if result["success"]:
+                        st.success(
+                            f"✅ Inserted/Updated {result['rows_inserted']} rows "
+                            f"into air_cargo_data."
+                        )
+                        st.toast(
+                            f"Ingested {result['rows_inserted']} rows!",
+                            icon="✅",
+                        )
+                    else:
+                        st.error(result["error"])
+                except Exception as exc:
+                    st.error(f"Upload failed: {exc}")
+
+    with ingest_tab_vec:
+        st.caption("Upload compliance manuals, IATA rules, and airline SOPs to pgvector & FAISS.")
+        uploaded_doc = st.file_uploader(
+            "Upload Cargo Manual / Policy (PDF, TXT, MD)",
+            type=["pdf", "txt", "md"],
+            help="Extracts text, splits into overlapping chunks, generates 384-dim embeddings, and stores in HNSW vector index.",
+            key="doc_uploader"
+        )
+        
+        doc_category = st.selectbox(
+            "Document Category",
+            ["Pharma & Cold Chain", "Dangerous Goods", "Live Animals", "Perishables", "Security & Customs", "General SOP"],
+            key="sidebar_doc_cat"
+        )
+        doc_airline = st.text_input("Airline / Scope", value="ALL", placeholder="e.g. Emirates or ALL", key="sidebar_doc_airline")
+
+        if uploaded_doc is not None:
+            doc_key = f"doc:{uploaded_doc.name}:{uploaded_doc.size}:{doc_category}"
+            if st.session_state.get("last_doc_uploaded") != doc_key:
+                try:
+                    from backend.vector_store import process_and_ingest_document
+                    with st.status("Ingesting into Vector Store...", expanded=True) as vst:
+                        vst.write("📄 Extracting text & chunking...")
+                        vst.write("🧠 Generating embeddings (all-MiniLM-L6-v2)...")
+                        vst.write("⚡ Indexing into Supabase pgvector & FAISS...")
+                        doc_res = process_and_ingest_document(
+                            file_obj=uploaded_doc,
+                            filename=uploaded_doc.name,
+                            category=doc_category,
+                            airline=doc_airline.strip() or "ALL"
+                        )
+                    
+                    st.session_state["last_doc_uploaded"] = doc_key
+                    if doc_res["success"]:
+                        st.success(f"✅ Ingested **{doc_res['chunks_count']} chunks** from `{doc_res['filename']}` ({doc_res['characters_count']} chars) into vector database!")
+                        st.toast(f"Embedded {doc_res['chunks_count']} chunks!", icon="📚")
+                    else:
+                        st.error(doc_res["error"])
+                except Exception as exc:
+                    st.error(f"Vector ingestion failed: {exc}")
 
     st.divider()
     st.header("About")
@@ -680,3 +728,45 @@ with tab_dashboard:
         if not df_preview.empty:
             df_preview.columns = ["Month", "Airport Name", "Airline", "Commodity", "Flow", "Weight (Tons)"]
             st.dataframe(df_preview, use_container_width=True, hide_index=True)
+
+        # pgvector Knowledge Base Section (RAG)
+        st.markdown("<p style='font-weight: 700; color: #8D1B3D; margin-top: 25px; font-size: 18px;'>📚 Cargo Knowledge Base (Supabase pgvector RAG)</p>", unsafe_allow_html=True)
+        st.caption("Unstructured airline SOPs, temperature guidelines, and IATA regulatory manuals indexed via SentenceTransformers (all-MiniLM-L6-v2) into 384-dimensional HNSW vector space.")
+
+        try:
+            from backend.vector_store import get_all_guidelines_summary, ingest_guideline
+            guidelines_list = get_all_guidelines_summary()
+            if guidelines_list:
+                df_kb = pd.DataFrame(guidelines_list)[["title", "category", "airline", "created_at"]]
+                df_kb.columns = ["Document Title", "Category", "Airline", "Ingested At"]
+                st.dataframe(df_kb, use_container_width=True, hide_index=True)
+            else:
+                st.info("No documents currently stored in vector database.")
+
+            # Live Document Ingestion Expander
+            with st.expander("➕ Ingest New Cargo Guideline / SOP into pgvector"):
+                with st.form("form_ingest_guideline"):
+                    col_g1, col_g2 = st.columns(2)
+                    with col_g1:
+                        doc_title = st.text_input("Document Title", placeholder="e.g. Cathay Pacific Pharma LIFT SOP")
+                        doc_airline = st.text_input("Airline / Scope", placeholder="e.g. Cathay Pacific or ALL")
+                    with col_g2:
+                        doc_cat = st.selectbox("Category", ["Pharma & Cold Chain", "Dangerous Goods", "Live Animals", "Perishables", "Security & Customs", "General SOP"])
+                    doc_content = st.text_area("Guideline Content / Policy Text", placeholder="Paste regulation text, temperature ranges, packaging rules...")
+                    
+                    submitted = st.form_submit_button("⚡ Embed & Ingest to pgvector", use_container_width=True)
+                    if submitted:
+                        if doc_title and doc_content:
+                            with st.spinner("Generating embeddings & inserting into HNSW index..."):
+                                new_id = ingest_guideline(
+                                    title=doc_title.strip(),
+                                    category=doc_cat,
+                                    airline=doc_airline.strip() or "ALL",
+                                    content=doc_content.strip(),
+                                )
+                            st.success(f"✅ Document successfully embedded and indexed (ID: {new_id})!")
+                            st.rerun()
+                        else:
+                            st.warning("Please provide both a Title and Content.")
+        except Exception as exc:
+            st.error(f"Vector store connection error: {exc}")

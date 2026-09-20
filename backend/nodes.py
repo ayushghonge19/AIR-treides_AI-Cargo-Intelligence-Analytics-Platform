@@ -44,16 +44,15 @@ def get_safe_db_url(url: str) -> str:
 
 AGENT_SYSTEM_PROMPT = (
     "You are an expert air cargo intelligence analyst at AIR-treides.\n\n"
-    "You have access to tools to query an air cargo database and search the web. "
-    "Use them when the user asks about cargo data, airlines, airports, weights, "
-    "trends, or market news.\n\n"
-    "For general greetings or questions unrelated to air cargo data, respond "
-    "directly without using any tools.\n\n"
-    "Database schema:\n"
+    "You have access to 3 specialized tools:\n"
+    "1. `execute_sql_query`: Query the PostgreSQL relational database (`air_cargo_data`) for quantitative metrics, weights, tonnage, monthly trends, and airport/airline rankings.\n"
+    "2. `search_cargo_regulations`: Perform semantic vector search on the Supabase pgvector knowledge base for air cargo compliance manuals, handling SOPs, temperature guidelines (cold chain/pharma), dangerous goods (lithium batteries), and live animal rules.\n"
+    "3. `search_web_news`: Search live global news via Tavily for breaking aviation disruptions, strikes, and market updates.\n\n"
+    "Database schema for SQL queries:\n"
     "Table: air_cargo_data\n"
-    "Columns: month (DATE), airport_name (TEXT), airline (TEXT), "
-    "commodity_type (TEXT), export_import (TEXT), weight_tons (NUMERIC)\n\n"
-    "When writing SQL, use only SELECT statements. Never modify data."
+    "Columns: month (DATE), airport_name (TEXT), airline (TEXT), commodity_type (TEXT), export_import (TEXT), weight_tons (NUMERIC)\n\n"
+    "When writing SQL, use only SELECT statements. Never modify data.\n"
+    "For general greetings, respond directly without using tools."
 )
 
 REPORT_SYSTEM_PROMPT = (
@@ -90,8 +89,9 @@ def is_safe_select(query: str) -> bool:
 
 
 def _get_llm() -> ChatGroq:
+    model_name = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
     return ChatGroq(
-        model="qwen/qwen3-32b",
+        model=model_name,
         groq_api_key=GROQ_API_KEY,
         temperature=0,
     )
@@ -128,6 +128,29 @@ def execute_sql_query(query: str) -> str:
 
 
 @tool
+def search_cargo_regulations(query: str) -> str:
+    """Search the Supabase pgvector knowledge base for air cargo compliance manuals, airline handling SOPs, pharma temperature ranges, dangerous goods (lithium batteries), live animals, and security guidelines.
+
+    Args:
+        query: The policy or procedural question (e.g., 'vaccine temperature qatar', 'lithium battery passenger flight', 'live animals ventilation').
+    """
+    try:
+        from backend.vector_store import search_guidelines
+        results = search_guidelines(query=query, top_k=3)
+        if not results:
+            return "No matching cargo guidelines or regulations found in the knowledge base."
+        formatted = []
+        for r in results:
+            formatted.append(
+                f"### {r['title']} (Airline: {r['airline']}, Category: {r['category']}, Similarity: {r['similarity_score']})\n"
+                f"{r['content']}"
+            )
+        return "\n\n".join(formatted)
+    except Exception as exc:
+        return f"Knowledge base vector search error: {exc}"
+
+
+@tool
 def search_web_news(query: str) -> str:
     """Search the web for the latest air cargo industry news, disruptions, and market context.
 
@@ -155,7 +178,7 @@ def search_web_news(query: str) -> str:
 # Message trimming (stay under Groq free-tier TPM limits)
 # ---------------------------------------------------------------------------
 
-MAX_HISTORY = 6
+MAX_HISTORY = 6                             
 
 
 # ---------------------------------------------------------------------------
@@ -316,5 +339,5 @@ def stream_report_writer(state_values: dict):
     yield "\n\nRate limit exceeded. Please wait a moment and try again."
 
 
-TOOLS = [execute_sql_query, search_web_news]
+TOOLS = [execute_sql_query, search_cargo_regulations, search_web_news]
 tool_node = ToolNode(TOOLS)

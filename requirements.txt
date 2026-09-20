@@ -11,3 +11,7 @@ pandas
 openpyxl
 plotly
 pytest
+sentence-transformers
+pgvector
+pypdf
+faiss-cpu
