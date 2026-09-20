@@ -1,11 +1,25 @@
 import uuid
 import os
+import dotenv
+from dotenv import load_dotenv
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 from sqlalchemy import create_engine, text
 from urllib.parse import quote_plus, unquote
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+# Load local .env if present
+load_dotenv()
+
+# Seamlessly bridge Streamlit Community Cloud Secrets to os.environ
+if hasattr(st, "secrets"):
+    try:
+        for secret_key, secret_val in st.secrets.items():
+            if isinstance(secret_val, str) and secret_key not in os.environ:
+                os.environ[secret_key] = secret_val
+    except Exception:
+        pass
 
 from backend.graph import app
 from backend.ingestion import process_and_upload_file
@@ -23,6 +37,7 @@ NODE_LABELS = {
 TOOL_LABELS = {
     "execute_sql_query": "📊 Queried the cargo database",
     "search_web_news": "🌐 Searched web for market context",
+    "search_cargo_regulations": "📚 Searched knowledge base (pgvector)",
 }
 
 # ---------------------------------------------------------------------------
@@ -48,17 +63,37 @@ def _init_session() -> None:
 def _graph_config() -> dict:
     return {"configurable": {"thread_id": st.session_state.thread_id}}
 
-# Helper to execute query to dataframe or value
+# Helper to execute query to dataframe or value safely
 def run_query_val(query: str):
-    #print(os.getenv("SUPABASE_URL"))
-    engine = create_engine(get_safe_db_url(os.getenv("SUPABASE_URL")))
-    with engine.connect() as conn:
-        res = conn.execute(text(query)).fetchone()
-        return res[0] if res else 0
+    db_url = os.getenv("SUPABASE_URL")
+    if not db_url:
+        return 0
+    try:
+        safe_url = get_safe_db_url(db_url)
+        if safe_url.startswith("postgresql://"):
+            safe_url = safe_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+        engine = create_engine(safe_url, pool_pre_ping=True)
+        with engine.connect() as conn:
+            res = conn.execute(text(query)).fetchone()
+            return res[0] if res else 0
+    except Exception as exc:
+        st.error(f"Database query error: {exc}")
+        return 0
 
 def run_query_df(query: str):
-    engine = create_engine(get_safe_db_url(os.getenv("SUPABASE_URL")))
-    return pd.read_sql(query, engine)
+    db_url = os.getenv("SUPABASE_URL")
+    if not db_url:
+        return pd.DataFrame()
+    try:
+        safe_url = get_safe_db_url(db_url)
+        if safe_url.startswith("postgresql://"):
+            safe_url = safe_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+        engine = create_engine(safe_url, pool_pre_ping=True)
+        with engine.connect() as conn:
+            return pd.read_sql_query(text(query), conn)
+    except Exception as exc:
+        st.error(f"Database query error: {exc}")
+        return pd.DataFrame()
 
 
 # ---------------------------------------------------------------------------
